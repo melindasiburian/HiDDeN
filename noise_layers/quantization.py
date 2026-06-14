@@ -25,8 +25,8 @@ class Quantization(nn.Module):
         self.weights = torch.tensor([((-1) ** (n + 1)) / (np.pi * (n + 1)) for n in range(self.N)]).to(device)
         self.scales = torch.tensor([2 * np.pi * (n + 1) for n in range(self.N)]).to(device)
         for _ in range(4):
-            self.weights.unsqueeze_(-1)
-            self.scales.unsqueeze_(-1)
+            self.weights = self.weights.unsqueeze(-1)
+            self.scales = self.scales.unsqueeze(-1)
 
 
     def fourier_rounding(self, tensor):

@@ -1,0 +1,2 @@
+2026-05-08 13:29:17,968 - INFO - Using device: cpu
+2026-05-08 13:29:17,968 - INFO - Loading models from ./checkpoints/test

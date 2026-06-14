@@ -11,6 +11,9 @@ from torchvision import datasets, transforms
 import torchvision.utils
 from torch.utils import data
 import torch.nn.functional as F
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 from options import HiDDenConfiguration, TrainingOptions
 from model.hidden import Hidden
@@ -23,7 +26,7 @@ def image_to_tensor(image):
     :return: (batch_size x channels x height x width) torch tensor in range [-1.0, 1.0]
     """
     image_tensor = torch.Tensor(image)
-    image_tensor.unsqueeze_(0)
+    image_tensor = image_tensor.unsqueeze(0)
     image_tensor = image_tensor.permute(0, 3, 1, 2)
     image_tensor = image_tensor / 127.5 - 1
     return image_tensor
@@ -54,7 +57,136 @@ def save_images(original_images, watermarked_images, epoch, folder, resize_to=No
 
     stacked_images = torch.cat([images, watermarked_images], dim=0)
     filename = os.path.join(folder, 'epoch-{}.png'.format(epoch))
-    torchvision.utils.save_image(stacked_images, filename, original_images.shape[0], normalize=False)
+    # pass nrow as a keyword argument so an integer isn't mistaken for the
+    # PIL 'format' parameter in some torchvision versions where the
+    # signature is (tensor, fp, format=None, **kwargs)
+    torchvision.utils.save_image(stacked_images, filename, nrow=original_images.shape[0], normalize=False)
+
+
+def save_visualizations(original_images, encoded_images, noised_images=None, mask=None,
+                        epoch: int = 0, folder: str = '.', resize_to=None, images_to_save: int = 8,
+                        amp_factor: float = 5.0, active_threshold: float = 0.02):
+    """
+    Save visualization figures for a batch: original vs encoded, residual heatmap, mask heatmap (optional),
+    and histograms of residuals. Creates one combined figure per image.
+
+    Args:
+        original_images: tensor [B, C, H, W] in range [-1, 1]
+        encoded_images: tensor [B, C, H, W] in range [-1, 1]
+        noised_images: optional tensor [B, C, H, W]
+        mask: optional tensor [B, 1, H, W] or [B, H, W]
+        epoch: epoch number used in filenames
+        folder: output folder
+        resize_to: tuple or None, if provided images will be resized for display
+        images_to_save: how many images from batch to save
+        amp_factor: factor to amplify residual for visualization
+        active_threshold: threshold on normalized residual magnitude for active area mask
+    """
+    os.makedirs(folder, exist_ok=True)
+
+    B = min(original_images.shape[0], images_to_save)
+    # move to cpu and float
+    orig = original_images[:B].cpu().float()
+    enc = encoded_images[:B].cpu().float()
+    if noised_images is not None:
+        noised = noised_images[:B].cpu().float()
+    else:
+        noised = None
+
+    for i in range(B):
+        o = orig[i]
+        e = enc[i]
+
+        if resize_to is not None:
+            o_disp = F.interpolate(o.unsqueeze(0), size=resize_to).squeeze(0)
+            e_disp = F.interpolate(e.unsqueeze(0), size=resize_to).squeeze(0)
+            if noised is not None:
+                n_disp = F.interpolate(noised[i].unsqueeze(0), size=resize_to).squeeze(0)
+        else:
+            o_disp = o
+            e_disp = e
+            if noised is not None:
+                n_disp = noised[i]
+
+        # images for display in uint8
+        o_img = tensor_to_image(o_disp.unsqueeze(0))[0]
+        e_img = tensor_to_image(e_disp.unsqueeze(0))[0]
+
+        # residual (float)
+        residual = e_disp - o_disp
+        # per-pixel magnitude (average over channels)
+        residual_mag = residual.abs().mean(dim=0).numpy()
+
+        # normalize residual magnitude for visualization
+        max_val = residual_mag.max() if residual_mag.max() > 0 else 1.0
+        residual_norm = residual_mag / (max_val + 1e-12)
+
+        # active area mask
+        active_mask = (residual_norm > active_threshold).astype(float)
+
+        # amplified residual for display (clipped)
+        amplified = (residual_norm * amp_factor).clip(0, 1)
+
+        # prepare histogram data (signed residual values across channels)
+        residual_vals = residual.view(-1).numpy()
+
+        # mask heatmap if provided
+        mask_heat = None
+        if mask is not None:
+            m = mask[:B].cpu()
+            mm = m[i]
+            if mm.dim() == 3:
+                mm = mm.squeeze(0)
+            if resize_to is not None:
+                mm = F.interpolate(mm.unsqueeze(0).unsqueeze(0), size=resize_to).squeeze().numpy()
+            else:
+                mm = mm.numpy()
+            mask_heat = mm
+
+        # build figure with subplots
+        cols = 5 if mask_heat is not None else 4
+        fig, axes = plt.subplots(1, cols, figsize=(4 * cols, 4))
+
+        ax = axes[0]
+        ax.imshow(o_img)
+        ax.set_title('Original')
+        ax.axis('off')
+
+        ax = axes[1]
+        ax.imshow(e_img)
+        ax.set_title('Encoded')
+        ax.axis('off')
+
+        ax = axes[2]
+        im = ax.imshow(residual_norm, cmap='hot')
+        ax.set_title('Residual heatmap (norm)')
+        ax.axis('off')
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+        ax = axes[3]
+        ax.imshow(amplified, cmap='inferno')
+        ax.set_title(f'Amplified x{amp_factor}')
+        ax.axis('off')
+
+        if mask_heat is not None:
+            ax = axes[4]
+            ax.imshow(mask_heat, cmap='Blues')
+            ax.set_title('Mask heatmap')
+            ax.axis('off')
+
+        # create a separate figure for histogram to keep layout clean
+        hist_fig, hist_ax = plt.subplots(1, 1, figsize=(6, 4))
+        hist_ax.hist(residual_vals, bins=100, color='gray')
+        hist_ax.set_title('Residual distribution (signed)')
+        hist_ax.set_xlabel('Residual value')
+        hist_ax.set_ylabel('Count')
+
+        # save both figures
+        fname_base = os.path.join(folder, f'epoch-{epoch:04d}_img-{i}')
+        fig.savefig(fname_base + '_summary.png', bbox_inches='tight')
+        hist_fig.savefig(fname_base + '_hist.png', bbox_inches='tight')
+        plt.close(fig)
+        plt.close(hist_fig)
 
 
 def sorted_nicely(l):
@@ -106,7 +238,7 @@ def model_from_checkpoint(hidden_net, checkpoint):
     hidden_net.optimizer_discrim.load_state_dict(checkpoint['discrim-optim'])
 
 
-def load_options(options_file_name) -> (TrainingOptions, HiDDenConfiguration, dict):
+def load_options(options_file_name) -> tuple[TrainingOptions, HiDDenConfiguration, dict]:
     """ Loads the training, model, and noise configurations from the given folder """
     with open(os.path.join(options_file_name), 'rb') as f:
         train_options = pickle.load(f)
@@ -164,21 +296,65 @@ def create_folder_for_run(runs_folder, experiment_name):
     if not os.path.exists(runs_folder):
         os.makedirs(runs_folder)
 
-    this_run_folder = os.path.join(runs_folder, f'{experiment_name} {time.strftime("%Y.%m.%d--%H-%M-%S")}')
+    # Base folder name uses a timestamp. If a folder with the same name already exists
+    # (e.g., a previous run started at the same second), append a numeric suffix to
+    # pick a unique folder name rather than raising FileExistsError.
+    base_name = f'{experiment_name} {time.strftime("%Y.%m.%d--%H-%M-%S")}'
+    this_run_folder = os.path.join(runs_folder, base_name)
 
-    os.makedirs(this_run_folder)
-    os.makedirs(os.path.join(this_run_folder, 'checkpoints'))
-    os.makedirs(os.path.join(this_run_folder, 'images'))
+    suffix = 1
+    while os.path.exists(this_run_folder):
+        this_run_folder = os.path.join(runs_folder, f"{base_name}-{suffix}")
+        suffix += 1
+
+    # Create the run folder and standard subfolders. Use exist_ok=True to be robust
+    # (in case of race conditions or concurrent processes), but we've already chosen
+    # a unique folder name so these should normally be created fresh.
+    os.makedirs(this_run_folder, exist_ok=True)
+    os.makedirs(os.path.join(this_run_folder, 'checkpoints'), exist_ok=True)
+    os.makedirs(os.path.join(this_run_folder, 'images'), exist_ok=True)
 
     return this_run_folder
 
 
 def write_losses(file_name, losses_accu, epoch, duration):
-    with open(file_name, 'a', newline='') as csvfile:
-        writer = csv.writer(csvfile)
-        if epoch == 1:
-            row_to_write = ['epoch'] + [loss_name.strip() for loss_name in losses_accu.keys()] + ['duration']
-            writer.writerow(row_to_write)
-        row_to_write = [epoch] + ['{:.4f}'.format(loss_avg.avg) for loss_avg in losses_accu.values()] + [
-            '{:.0f}'.format(duration)]
-        writer.writerow(row_to_write)
+    # On Windows a different process (e.g. a spreadsheet app) can hold an
+    # exclusive lock on the CSV. Instead of failing immediately, retry a few
+    # times with exponential backoff so transient locks don't crash training.
+    max_attempts = 5
+    base_delay = 0.5
+    row_header = None
+    row_to_write = [epoch] + ['{:.4f}'.format(loss_avg.avg) for loss_avg in losses_accu.values()] + [
+        '{:.0f}'.format(duration)]
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Open, write and close quickly so we don't hold the file longer than needed.
+            with open(file_name, 'a', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                if epoch == 1:
+                    row_header = ['epoch'] + [loss_name.strip() for loss_name in losses_accu.keys()] + ['duration']
+                    writer.writerow(row_header)
+                writer.writerow(row_to_write)
+            break
+        except PermissionError:
+            if attempt == max_attempts:
+                # Final attempt failed: instead of raising (which would stop training),
+                # fall back to appending into a separate pending file so data isn't lost
+                # and training can continue. The pending file can be merged later
+                # when the CSV is available.
+                pending_file = file_name + '.pending'
+                try:
+                    with open(pending_file, 'a', newline='') as pfile:
+                        pwriter = csv.writer(pfile)
+                        # write header if this is the first epoch write
+                        if epoch == 1:
+                            pwriter.writerow(['epoch'] + [loss_name.strip() for loss_name in losses_accu.keys()] + ['duration'])
+                        pwriter.writerow(row_to_write)
+                    logging.warning(f"Could not write to {file_name} due to file lock; appended to {pending_file} instead.")
+                    break
+                except Exception:
+                    # If even the pending file cannot be written (very rare), re-raise
+                    raise
+            # Wait a bit and retry. Use exponential backoff to reduce contention.
+            time.sleep(base_delay * (2 ** (attempt - 1)))

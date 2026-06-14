@@ -86,6 +86,21 @@ def train(model: Hidden,
                                   encoded_images[:images_to_save, :, :, :].cpu(),
                                   epoch,
                                   os.path.join(this_run_folder, 'images'), resize_to=saved_images_size)
+
+                # also save visualization heatmaps and histograms for residuals
+                try:
+                    utils.save_visualizations(image.cpu()[:images_to_save, :, :, :],
+                                               encoded_images[:images_to_save, :, :, :].cpu(),
+                                               noised_images[:images_to_save, :, :, :].cpu(),
+                                               mask=None,
+                                               epoch=epoch,
+                                               folder=os.path.join(this_run_folder, 'images', 'visualizations'),
+                                               resize_to=saved_images_size,
+                                               images_to_save=images_to_save,
+                                               amp_factor=5.0,
+                                               active_threshold=0.02)
+                except Exception as ex:
+                    logging.warning(f'Failed to save visualizations: {ex}')
                 first_iteration = False
 
         utils.log_progress(validation_losses)

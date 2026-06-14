@@ -51,7 +51,7 @@ def main():
     image = randomCrop(np.array(image_pil), hidden_config.H, hidden_config.W)
     image_tensor = TF.to_tensor(image).to(device)
     image_tensor = image_tensor * 2 - 1  # transform from [0, 1] to [-1, 1]
-    image_tensor.unsqueeze_(0)
+    image_tensor = image_tensor.unsqueeze(0)
 
     # for t in range(args.times):
     message = torch.Tensor(np.random.choice([0, 1], (image_tensor.shape[0],

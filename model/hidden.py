@@ -37,8 +37,8 @@ class Hidden:
         self.mse_loss = nn.MSELoss().to(device)
 
         # Defined the labels used for training the discriminator/adversarial loss
-        self.cover_label = 1
-        self.encoded_label = 0
+        self.cover_label = 1.0
+        self.encoded_label = 0.0
 
         self.tb_logger = tb_logger
         if tb_logger is not None:
@@ -51,10 +51,12 @@ class Hidden:
             discrim_final.weight.register_hook(tb_logger.grad_hook_by_name('grads/discrim_out'))
 
 
-    def train_on_batch(self, batch: list):
+    def train_on_batch(self, batch: list, mask=None, alpha=None):
         """
         Trains the network on a single batch consisting of images and messages
         :param batch: batch of training data, in the form [images, messages]
+        :param mask: Optional binary mask tensor for mask-aware embedding
+        :param alpha: Optional embedding strength scalar
         :return: dictionary of error metrics from Encoder, Decoder, and Discriminator on the current batch
         """
         images, messages = batch
@@ -75,7 +77,7 @@ class Hidden:
             d_loss_on_cover.backward()
 
             # train on fake
-            encoded_images, noised_images, decoded_messages = self.encoder_decoder(images, messages)
+            encoded_images, noised_images, decoded_messages = self.encoder_decoder(images, messages, mask=mask, alpha=alpha)
             d_on_encoded = self.discriminator(encoded_images.detach())
             d_loss_on_encoded = self.bce_with_logits_loss(d_on_encoded, d_target_label_encoded)
 
@@ -117,10 +119,12 @@ class Hidden:
         }
         return losses, (encoded_images, noised_images, decoded_messages)
 
-    def validate_on_batch(self, batch: list):
+    def validate_on_batch(self, batch: list, mask=None, alpha=None):
         """
         Runs validation on a single batch of data consisting of images and messages
         :param batch: batch of validation data, in form [images, messages]
+        :param mask: Optional binary mask tensor for mask-aware embedding
+        :param alpha: Optional embedding strength scalar
         :return: dictionary of error metrics from Encoder, Decoder, and Discriminator on the current batch
         """
         # if TensorboardX logging is enabled, save some of the tensors.
@@ -146,7 +150,7 @@ class Hidden:
             d_on_cover = self.discriminator(images)
             d_loss_on_cover = self.bce_with_logits_loss(d_on_cover, d_target_label_cover)
 
-            encoded_images, noised_images, decoded_messages = self.encoder_decoder(images, messages)
+            encoded_images, noised_images, decoded_messages = self.encoder_decoder(images, messages, mask=mask, alpha=alpha)
 
             d_on_encoded = self.discriminator(encoded_images)
             d_loss_on_encoded = self.bce_with_logits_loss(d_on_encoded, d_target_label_encoded)
